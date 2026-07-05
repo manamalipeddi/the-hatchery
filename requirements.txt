@@ -1,0 +1,4 @@
+anthropic>=0.40.0
+twilio>=9.0.0
+youtube-transcript-api>=1.0.0
+requests>=2.31.0
