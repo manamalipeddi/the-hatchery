@@ -184,13 +184,14 @@ def read_log_tail(n=3):
 
 # ---------------------------------------------------------------- whatsapp
 
-def notify(teaser, link):
-    """Send the approved WhatsApp utility template: {{1}} teaser, {{2}} link.
-    Works regardless of the 24h window. Template variables must be single-line."""
+def notify(teaser):
+    """Send the approved WhatsApp utility template: {{1}} teaser only.
+    No link — Manasa checks Notion directly. Template variables must be
+    single-line."""
     teaser = " ".join(teaser.split())[:550]  # no newlines/tabs, sane length
     twilio.messages.create(from_=WA_FROM, to=WA_TO,
                            content_sid=TWILIO_CONTENT_SID,
-                           content_variables=json.dumps({"1": teaser, "2": link}))
+                           content_variables=json.dumps({"1": teaser}))
 
 
 def _chunk(text, limit=1450):
@@ -390,7 +391,7 @@ def run_digest():
         f"Digest {datetime.now(timezone.utc).date().isoformat()}", digest)
     delivered = try_freeform(f"{digest}\n\nFull version with links: {url}")
     if not delivered:
-        notify(teaser, url)
+        notify(teaser)
         print("Window closed — sent template doorbell instead.")
 
 
@@ -410,7 +411,6 @@ if __name__ == "__main__":
     except Exception as e:
         # failure must be loud, not silent
         try:
-            notify(f"⚠️ Second Brain cron failed: {type(e).__name__}: {e}",
-                   f"https://app.notion.com/{DIGEST_LOG_PAGE.replace('-', '')}")
+            notify(f"⚠️ cron failed: {type(e).__name__}: {e} — check Railway logs")
         finally:
             raise
