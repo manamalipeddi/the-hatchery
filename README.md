@@ -20,12 +20,16 @@ sends the WhatsApp digest **Mondays only**.
 ### 2. Twilio template (5 min + WhatsApp approval wait)
 Twilio Console → Content Template Builder → Create:
 - Name: `second_brain_digest`, Language: English, Category: **Utility**
+- Content type: **Text**
 - Body:
   ```
   🐣 The Hatchery: {{1}}
 
-  Open: {{2}}
+  Visit The Hatchery to read more.
   ```
+  (No link variable — WhatsApp Business accounts without full verification
+  have limited template capability; MedTracker's templates are Text-only for
+  the same reason. Manasa checks Notion directly for the full digest.)
 - Submit for WhatsApp approval (minutes to ~1 day, same as MedTracker's templates)
 - Copy the Content SID (`HX...`) → `TWILIO_CONTENT_SID`
 
