@@ -446,36 +446,53 @@ def build_context():
 def run_digest():
     prompt = get_digest_prompt()
     context = build_context()
-    msg = claude.messages.create(
-        model=MODEL, max_tokens=4000,
-        tools=[{"type": "web_search_20250305", "name": "web_search",
-                "max_uses": 4}],
-        messages=[{"role": "user", "content":
-            f"{prompt}\n\nAll Notion data is provided below. Use web search ONLY "
-            f"for the OUTSIDE THE DATABASE section.\n\n"
-            f"FORMATTING (the digest renders as a Notion page):\n"
-            f"- Use '## ' for the five section headers and '### ' for sub-labels.\n"
-            f"- Use '- ' for bullet lists (footer, finds).\n"
-            f"- Use **bold** for entry titles and key terms; *italic* for quoted\n"
-            f"  seed text.\n"
-            f"- Links MUST be markdown: [short label](url) — never a bare pasted\n"
-            f"  URL mid-sentence, never a raw entry title without its link.\n"
-            f"- Keep paragraphs short (2-4 sentences). Use '---' between sections.\n"
-            f"Begin your response with one line starting 'TEASER: ' — this becomes "
-            f"the WhatsApp message and must earn an open on its own. Name the single "
-            f"most interesting SPECIFIC finding of the week — the actual idea, "
-            f"tension, or connection, never 'your digest is ready' or 'this week's "
-            f"themes' (labels, not headlines). Authentic, not clickbait: no "
-            f"manufactured suspense or withheld hooks; the pull comes from it being "
-            f"TRUE and about her actual thinking. One concrete sentence, ≤25 words, "
-            f"like a smart friend texting 'hey, noticed something about your week'. "
-            f"Good: 'Two of your entries this week quietly contradict each other "
-            f"about who AI should serve.' Weak: 'Interesting patterns this week.' "
-            f"Put the teaser line BEFORE any heading.\n\n{context}"}])
+    tools = [{"type": "web_search_20250305", "name": "web_search",
+              "max_uses": 4}]
+    user_content = (
+        f"{prompt}\n\nAll Notion data is provided below. Use web search ONLY "
+        f"for the OUTSIDE THE DATABASE section.\n\n"
+        f"FORMATTING (the digest renders as a Notion page):\n"
+        f"- Use '## ' for the five section headers and '### ' for sub-labels.\n"
+        f"- Use '- ' for bullet lists (footer, finds).\n"
+        f"- Use **bold** for entry titles and key terms; *italic* for quoted\n"
+        f"  seed text.\n"
+        f"- Links MUST be markdown: [short label](url) — never a bare pasted\n"
+        f"  URL mid-sentence, never a raw entry title without its link.\n"
+        f"- Keep paragraphs short (2-4 sentences). Use '---' between sections.\n"
+        f"Begin your response with one line starting 'TEASER: ' — this becomes "
+        f"the WhatsApp message and must earn an open on its own. Name the single "
+        f"most interesting SPECIFIC finding of the week — the actual idea, "
+        f"tension, or connection, never 'your digest is ready' or 'this week's "
+        f"themes' (labels, not headlines). Authentic, not clickbait: no "
+        f"manufactured suspense or withheld hooks; the pull comes from it being "
+        f"TRUE and about her actual thinking. One concrete sentence, ≤25 words, "
+        f"like a smart friend texting 'hey, noticed something about your week'. "
+        f"Good: 'Two of your entries this week quietly contradict each other "
+        f"about who AI should serve.' Weak: 'Interesting patterns this week.' "
+        f"Put the teaser line BEFORE any heading.\n\n{context}")
+
+    messages = [{"role": "user", "content": user_content}]
+    # Continuation loop: web_search is a server-side tool. The model may pause
+    # (stop_reason 'pause_turn') mid-search, or end on a tool_use, before it
+    # has written the final digest text. Keep feeding its own output back until
+    # it finishes with a normal 'end_turn'. Cap iterations so a misbehaving
+    # run can't loop forever.
+    msg = None
+    for _ in range(8):
+        msg = claude.messages.create(
+            model=MODEL, max_tokens=4000, tools=tools, messages=messages)
+        if msg.stop_reason in ("pause_turn", "tool_use"):
+            messages.append({"role": "assistant", "content": msg.content})
+            # server-side tool results are already attached to msg.content on
+            # the next call; we just continue the turn
+            continue
+        break
+
     digest = "\n".join(b.text for b in msg.content
                        if getattr(b, "type", "") == "text").strip()
     if not digest:
-        raise RuntimeError("Digest came back empty")
+        raise RuntimeError(
+            f"Digest came back empty (stop_reason={getattr(msg,'stop_reason',None)})")
     teaser = "Your Hatchery digest is ready"
     if digest.startswith("TEASER:"):
         first, _, rest = digest.partition("\n")
