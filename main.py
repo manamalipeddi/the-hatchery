@@ -39,7 +39,7 @@ LENS_LIBRARY_PAGE = "3935f362-f277-81b8-bf53-c27656033031"
 MASTER_PROMPTS_PAGE = "3925f362-f277-8134-a0d5-d024eb4a3604"
 DIGEST_LOG_PAGE = "3935f362-f277-814b-a3e4-ef67918baa54"
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"      # current Sonnet tier (released 2026-06-30)
 NEAR_EMPTY_THRESHOLD = 4        # fewer new entries than this -> spark mode
 DIGEST_WINDOW_DAYS = 8          # Tuesday digest covers Monday-evening sweep
 FORCE_DIGEST = os.environ.get("FORCE_DIGEST") == "1"  # manual test runs
@@ -144,22 +144,101 @@ def append_todos(page_id, items):
                  json={"children": children}).raise_for_status()
 
 
+import re
+
+def _rich_text(text):
+    """Parse inline markdown (**bold**, *italic*, [label](url), bare URLs)
+    into Notion rich_text objects. Keeps each object under Notion's limits."""
+    # tokenize on links first, then bold, then italic
+    tokens = []
+    pattern = re.compile(
+        r'\[([^\]]+)\]\((https?://[^\s)]+)\)'      # [label](url)
+        r'|(\*\*)(.+?)\*\*'                          # **bold**
+        r'|(\*)(.+?)\*'                              # *italic*
+        r'|(https?://[^\s)]+)')                      # bare url
+    pos = 0
+    for m in pattern.finditer(text):
+        if m.start() > pos:
+            tokens.append(("plain", text[pos:m.start()]))
+        if m.group(1):                               # linked label
+            tokens.append(("link", m.group(1), m.group(2)))
+        elif m.group(3):                             # bold
+            tokens.append(("bold", m.group(4)))
+        elif m.group(5):                             # italic
+            tokens.append(("italic", m.group(6)))
+        elif m.group(7):                             # bare url
+            tokens.append(("link", m.group(7), m.group(7)))
+        pos = m.end()
+    if pos < len(text):
+        tokens.append(("plain", text[pos:]))
+
+    out = []
+    for tok in tokens:
+        kind = tok[0]
+        if kind == "plain":
+            content, ann, link = tok[1], {}, None
+        elif kind == "bold":
+            content, ann, link = tok[1], {"bold": True}, None
+        elif kind == "italic":
+            content, ann, link = tok[1], {"italic": True}, None
+        elif kind == "link":
+            content, ann, link = tok[1], {}, tok[2]
+        if not content:
+            continue
+        obj = {"type": "text", "text": {"content": content[:1900]}}
+        if link:
+            obj["text"]["link"] = {"url": link}
+        if ann:
+            obj["annotations"] = ann
+        out.append(obj)
+    return out or [{"type": "text", "text": {"content": text[:1900]}}]
+
+
+def _blocks_from_markdown(text):
+    """Turn a digest's markdown into Notion blocks: headings, bullets,
+    dividers, and paragraphs with inline formatting."""
+    blocks = []
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if line.strip() == "---":
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
+        elif line.startswith("### "):
+            blocks.append({"object": "block", "type": "heading_3",
+                           "heading_3": {"rich_text": _rich_text(line[4:])}})
+        elif line.startswith("## "):
+            blocks.append({"object": "block", "type": "heading_2",
+                           "heading_2": {"rich_text": _rich_text(line[3:])}})
+        elif line.startswith("# "):
+            blocks.append({"object": "block", "type": "heading_1",
+                           "heading_1": {"rich_text": _rich_text(line[2:])}})
+        elif line.lstrip().startswith(("- ", "— ", "• ")):
+            content = line.lstrip()[2:]
+            blocks.append({"object": "block", "type": "bulleted_list_item",
+                           "bulleted_list_item": {"rich_text": _rich_text(content)}})
+        else:
+            blocks.append({"object": "block", "type": "paragraph",
+                           "paragraph": {"rich_text": _rich_text(line)}})
+    return blocks
+
+
 def create_log_entry(title, text):
-    """Write a digest as its own child page under the Digest Log. Returns its URL."""
-    children = []
-    for para in text.split("\n\n"):
-        para = para.strip()
-        if para:
-            children.append({"object": "block", "type": "paragraph",
-                             "paragraph": {"rich_text": [{"type": "text",
-                                           "text": {"content": para[:1900]}}]}})
+    """Write a digest as its own child page under the Digest Log, rendering
+    markdown into real Notion headings/bold/links. Returns its URL."""
+    blocks = _blocks_from_markdown(text)
     r = NOTION.post("https://api.notion.com/v1/pages", json={
         "parent": {"page_id": DIGEST_LOG_PAGE},
         "properties": {"title": {"title": [{"type": "text",
                                             "text": {"content": title}}]}},
-        "children": children[:100],
+        "children": blocks[:100],
     })
     r.raise_for_status()
+    page_id = r.json()["id"]
+    # Notion caps children at 100 per request; append the rest in batches
+    for i in range(100, len(blocks), 100):
+        NOTION.patch(f"https://api.notion.com/v1/blocks/{page_id}/children",
+                     json={"children": blocks[i:i+100]}).raise_for_status()
     return r.json()["url"].replace("www.notion.so", "app.notion.com")
 
 
@@ -373,11 +452,26 @@ def run_digest():
                 "max_uses": 4}],
         messages=[{"role": "user", "content":
             f"{prompt}\n\nAll Notion data is provided below. Use web search ONLY "
-            f"for the OUTSIDE THE DATABASE section. The digest will be read as a "
-            f"Notion page: short section headers, blank lines between paragraphs, "
-            f"plain URLs. Begin your response with one line starting 'TEASER: ' — "
-            f"max 20 words on the single most interesting thing in this digest "
-            f"(it becomes the WhatsApp notification).\n\n{context}"}])
+            f"for the OUTSIDE THE DATABASE section.\n\n"
+            f"FORMATTING (the digest renders as a Notion page):\n"
+            f"- Use '## ' for the five section headers and '### ' for sub-labels.\n"
+            f"- Use '- ' for bullet lists (footer, finds).\n"
+            f"- Use **bold** for entry titles and key terms; *italic* for quoted\n"
+            f"  seed text.\n"
+            f"- Links MUST be markdown: [short label](url) — never a bare pasted\n"
+            f"  URL mid-sentence, never a raw entry title without its link.\n"
+            f"- Keep paragraphs short (2-4 sentences). Use '---' between sections.\n"
+            f"Begin your response with one line starting 'TEASER: ' — this becomes "
+            f"the WhatsApp message and must earn an open on its own. Name the single "
+            f"most interesting SPECIFIC finding of the week — the actual idea, "
+            f"tension, or connection, never 'your digest is ready' or 'this week's "
+            f"themes' (labels, not headlines). Authentic, not clickbait: no "
+            f"manufactured suspense or withheld hooks; the pull comes from it being "
+            f"TRUE and about her actual thinking. One concrete sentence, ≤25 words, "
+            f"like a smart friend texting 'hey, noticed something about your week'. "
+            f"Good: 'Two of your entries this week quietly contradict each other "
+            f"about who AI should serve.' Weak: 'Interesting patterns this week.' "
+            f"Put the teaser line BEFORE any heading.\n\n{context}"}])
     digest = "\n".join(b.text for b in msg.content
                        if getattr(b, "type", "") == "text").strip()
     if not digest:
