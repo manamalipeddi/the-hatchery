@@ -480,7 +480,7 @@ def run_digest():
     msg = None
     for _ in range(8):
         msg = claude.messages.create(
-            model=MODEL, max_tokens=4000, tools=tools, messages=messages)
+            model=MODEL, max_tokens=16000, tools=tools, messages=messages)
         if msg.stop_reason in ("pause_turn", "tool_use"):
             messages.append({"role": "assistant", "content": msg.content})
             # server-side tool results are already attached to msg.content on
@@ -490,6 +490,10 @@ def run_digest():
 
     digest = "\n".join(b.text for b in msg.content
                        if getattr(b, "type", "") == "text").strip()
+    if getattr(msg, "stop_reason", None) == "max_tokens":
+        raise RuntimeError(
+            "Digest hit max_tokens — truncated. Raise the limit or shorten the "
+            "prompt; not sending a half-written digest.")
     if not digest:
         raise RuntimeError(
             f"Digest came back empty (stop_reason={getattr(msg,'stop_reason',None)})")
