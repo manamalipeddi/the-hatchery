@@ -1,5 +1,5 @@
 """
-Second Brain cron — runs daily on Railway.
+The Hatchery cron — runs daily on Railway.
 - Every run: process new Media Inbox entries (transcript -> checkbox takeaways)
 - Tuesdays only: compose + send the weekly digest via WhatsApp (covers Monday-evening sweep)
 
@@ -192,6 +192,41 @@ def _rich_text(text):
             obj["annotations"] = ann
         out.append(obj)
     return out or [{"type": "text", "text": {"content": text[:1900]}}]
+
+
+def _markdown_to_whatsapp(text):
+    """Convert digest markdown into WhatsApp's own formatting.
+    WhatsApp: *bold* (single asterisk), _italic_, no headings, no links markup.
+    - Headings -> bold line
+    - **bold** -> *bold*, *italic* -> _italic_
+    - [label](url) -> label (url)
+    - --- divider -> blank line
+    """
+    out = []
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        if line.strip() == "---":
+            out.append("")
+            continue
+        # strip heading markers, make the heading bold instead
+        m = re.match(r'^(#{1,3})\s+(.*)$', line)
+        if m:
+            line = m.group(2)
+            heading = True
+        else:
+            heading = False
+        # links: [label](url) -> label (url)
+        line = re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)', r'\1 (\2)', line)
+        # bold **x** -> *x*  (do before italic so ** isn't eaten by * rule)
+        line = re.sub(r'\*\*(.+?)\*\*', r'*\1*', line)
+        # italic *x* or _x_ -> _x_   (only single-asterisk not already converted)
+        line = re.sub(r'(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)', r'_\1_', line)
+        if heading and line.strip():
+            line = f"*{line.strip()}*"
+        out.append(line)
+    # collapse 3+ blank lines to max 2
+    result = "\n".join(out)
+    return re.sub(r'\n{3,}', '\n\n', result).strip()
 
 
 def _blocks_from_markdown(text):
@@ -469,7 +504,12 @@ def run_digest():
         f"like a smart friend texting 'hey, noticed something about your week'. "
         f"Good: 'Two of your entries this week quietly contradict each other "
         f"about who AI should serve.' Weak: 'Interesting patterns this week.' "
-        f"Put the teaser line BEFORE any heading.\n\n{context}")
+        f"Put the teaser line BEFORE any heading.\n"
+        f"After the teaser, add a second line starting 'TITLE: ' — a newspaper-"
+        f"style headline (≤10 words) distilling ONLY section 1 (where her "
+        f"attention is this week) into one scannable line. It labels the week's "
+        f"attention pattern, not the whole digest. No date, no 'digest' — just "
+        f"the headline. Then the digest body.\n\n{context}")
 
     messages = [{"role": "user", "content": user_content}]
     # Continuation loop: web_search is a server-side tool. The model may pause
@@ -498,13 +538,26 @@ def run_digest():
         raise RuntimeError(
             f"Digest came back empty (stop_reason={getattr(msg,'stop_reason',None)})")
     teaser = "Your Hatchery digest is ready"
+    headline = ""
     if digest.startswith("TEASER:"):
         first, _, rest = digest.partition("\n")
         teaser = first.replace("TEASER:", "").strip()
         digest = rest.strip()
-    url = create_log_entry(
-        f"Digest {datetime.now(timezone.utc).date().isoformat()}", digest)
-    delivered = try_freeform(f"{digest}\n\nFull version with links: {url}")
+    if digest.startswith("TITLE:"):
+        first, _, rest = digest.partition("\n")
+        headline = first.replace("TITLE:", "").strip()
+        digest = rest.strip()
+
+    # Page title: "2026-W28 · Jul 6 · <headline>" (ISO year+week for correct
+    # sorting; no weekday since it's always Tuesday).
+    now = datetime.now(timezone.utc)
+    iso_year, iso_week, _ = now.isocalendar()
+    stamp = f"{iso_year}-W{iso_week:02d} · {now.strftime('%b %-d')}"
+    page_title = f"{stamp} · {headline}" if headline else stamp
+
+    url = create_log_entry(page_title, digest)
+    wa_body = _markdown_to_whatsapp(digest)
+    delivered = try_freeform(f"{wa_body}\n\nFull version: {url}")
     if not delivered:
         notify(teaser)
         print("Window closed — sent template doorbell instead.")
