@@ -1,5 +1,5 @@
 """
-The Hatchery cron — runs daily on Railway.
+Second Brain cron — runs daily on Railway.
 - Every run: process new Media Inbox entries (transcript -> checkbox takeaways)
 - Tuesdays only: compose + send the weekly digest via WhatsApp (covers Monday-evening sweep)
 
@@ -147,27 +147,32 @@ def append_todos(page_id, items):
 import re
 
 def _rich_text(text):
-    """Parse inline markdown (**bold**, *italic*, [label](url), bare URLs)
-    into Notion rich_text objects. Keeps each object under Notion's limits."""
-    # tokenize on links first, then bold, then italic
+    """Parse inline markdown (**bold**, *italic*, [label](url), bare URLs,
+    and combinations like **[label](url)**) into Notion rich_text objects.
+    Tolerates backslash-escaped brackets (\\[ \\]) the model sometimes emits."""
+    # Normalize escaped brackets the model occasionally produces: \[ \] -> [ ]
+    text = text.replace(r'\[', '[').replace(r'\]', ']')
     tokens = []
     pattern = re.compile(
-        r'\[([^\]]+)\]\((https?://[^\s)]+)\)'      # [label](url)
-        r'|(\*\*)(.+?)\*\*'                          # **bold**
-        r'|(\*)(.+?)\*'                              # *italic*
-        r'|(https?://[^\s)]+)')                      # bare url
+        r'\*\*\[([^\]]+)\]\((https?://[^\s)]+)\)\*\*'  # **[label](url)** bold link
+        r'|\[([^\]]+)\]\((https?://[^\s)]+)\)'          # [label](url)
+        r'|(\*\*)(.+?)\*\*'                              # **bold**
+        r'|(\*)(.+?)\*'                                  # *italic*
+        r'|(https?://[^\s)]+)')                          # bare url
     pos = 0
     for m in pattern.finditer(text):
         if m.start() > pos:
             tokens.append(("plain", text[pos:m.start()]))
-        if m.group(1):                               # linked label
-            tokens.append(("link", m.group(1), m.group(2)))
-        elif m.group(3):                             # bold
-            tokens.append(("bold", m.group(4)))
-        elif m.group(5):                             # italic
-            tokens.append(("italic", m.group(6)))
-        elif m.group(7):                             # bare url
-            tokens.append(("link", m.group(7), m.group(7)))
+        if m.group(1):                               # **[label](url)** bold link
+            tokens.append(("boldlink", m.group(1), m.group(2)))
+        elif m.group(3):                             # [label](url)
+            tokens.append(("link", m.group(3), m.group(4)))
+        elif m.group(5):                             # **bold**
+            tokens.append(("bold", m.group(6)))
+        elif m.group(7):                             # *italic*
+            tokens.append(("italic", m.group(8)))
+        elif m.group(9):                             # bare url
+            tokens.append(("link", m.group(9), m.group(9)))
         pos = m.end()
     if pos < len(text):
         tokens.append(("plain", text[pos:]))
@@ -183,6 +188,8 @@ def _rich_text(text):
             content, ann, link = tok[1], {"italic": True}, None
         elif kind == "link":
             content, ann, link = tok[1], {}, tok[2]
+        elif kind == "boldlink":
+            content, ann, link = tok[1], {"bold": True}, tok[2]
         if not content:
             continue
         obj = {"type": "text", "text": {"content": content[:1900]}}
@@ -208,6 +215,8 @@ def _markdown_to_whatsapp(text):
         if line.strip() == "---":
             out.append("")
             continue
+        # normalize escaped brackets \[ \] -> [ ]
+        line = line.replace(r'\[', '[').replace(r'\]', ']')
         # strip heading markers, make the heading bold instead
         m = re.match(r'^(#{1,3})\s+(.*)$', line)
         if m:
@@ -215,6 +224,9 @@ def _markdown_to_whatsapp(text):
             heading = True
         else:
             heading = False
+        # **[label](url)** -> *label* (url)  (bold link, before plain rules)
+        line = re.sub(r'\*\*\[([^\]]+)\]\((https?://[^\s)]+)\)\*\*',
+                      r'*\1* (\2)', line)
         # links: [label](url) -> label (url)
         line = re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)', r'\1 (\2)', line)
         # bold **x** -> *x*  (do before italic so ** isn't eaten by * rule)
