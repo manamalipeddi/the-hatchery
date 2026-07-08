@@ -509,7 +509,11 @@ def run_digest():
         f"style headline (≤10 words) distilling ONLY section 1 (where her "
         f"attention is this week) into one scannable line. It labels the week's "
         f"attention pattern, not the whole digest. No date, no 'digest' — just "
-        f"the headline. Then the digest body.\n\n{context}")
+        f"the headline. Then the digest body.\n"
+        f"CRITICAL: the VERY FIRST line of your reply must be the TEASER line. "
+        f"Do NOT narrate your research or write any preamble before it — even if "
+        f"you searched the web first, the teaser still comes first in the final "
+        f"output.\n\n{context}")
 
     messages = [{"role": "user", "content": user_content}]
     # Continuation loop: web_search is a server-side tool. The model may pause
@@ -539,14 +543,30 @@ def run_digest():
             f"Digest came back empty (stop_reason={getattr(msg,'stop_reason',None)})")
     teaser = "Your Hatchery digest is ready"
     headline = ""
-    if digest.startswith("TEASER:"):
-        first, _, rest = digest.partition("\n")
-        teaser = first.replace("TEASER:", "").strip()
-        digest = rest.strip()
-    if digest.startswith("TITLE:"):
-        first, _, rest = digest.partition("\n")
-        headline = first.replace("TITLE:", "").strip()
-        digest = rest.strip()
+    # The model may emit a preamble line (e.g. "I'll research...") before the
+    # TEASER when it web-searches first, so scan for the markers rather than
+    # assuming position zero. Remove the marker lines (and any preamble before
+    # them) from the body.
+    lines = digest.split("\n")
+    body_start = 0
+    found_marker = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("TEASER:"):
+            teaser = stripped[len("TEASER:"):].strip()
+            body_start = max(body_start, i + 1)
+            found_marker = True
+        elif stripped.startswith("TITLE:"):
+            headline = stripped[len("TITLE:"):].strip()
+            body_start = max(body_start, i + 1)
+            found_marker = True
+    # Only trim if we actually found markers; otherwise keep the whole body so
+    # a marker-less digest isn't accidentally gutted.
+    if found_marker:
+        body_lines = lines[body_start:]
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+        digest = "\n".join(body_lines).strip()
 
     # Page title: "2026-W28 · Jul 6 · <headline>" (ISO year+week for correct
     # sorting; no weekday since it's always Tuesday).
